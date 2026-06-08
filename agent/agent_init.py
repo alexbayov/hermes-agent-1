@@ -145,6 +145,7 @@ def init_agent(
     args: list[str] | None = None,
     model: str = "",
     max_iterations: int = 90,  # Default tool-calling iterations (shared with subagents)
+    no_progress_k: int = 4,  # Consecutive same-tool-pattern iterations before stall exit (HRM-26)
     tool_delay: float = 1.0,
     enabled_toolsets: List[str] = None,
     disabled_toolsets: List[str] = None,
@@ -253,6 +254,7 @@ def init_agent(
 
     agent.model = model
     agent.max_iterations = max_iterations
+    agent.no_progress_k = no_progress_k
     # Shared iteration budget — parent creates, children inherit.
     # Consumed by every LLM turn across parent + all subagents.
     agent.iteration_budget = iteration_budget or IterationBudget(max_iterations)

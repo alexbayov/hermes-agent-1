@@ -2292,6 +2292,12 @@ class AIAgent:
                 "the model produced no follow-up text. Send `continue` to "
                 "let it summarize."
             )
+        if reason == "no_progress_stall":
+            return (
+                "⏸️ No progress detected — same tool pattern repeated without "
+                "new results. Review the tool output above and provide new "
+                "instructions, or adjust the approach."
+            )
         # Unknown/diagnostic-only reasons (e.g. "unknown", guardrail_halt
         # which already surfaces its own message) — don't second-guess.
         return ""

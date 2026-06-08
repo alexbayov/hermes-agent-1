@@ -1,0 +1,7 @@
+name: discovery_protocol
+version: 1.0.0
+description: Layer 3 LLM Middleware — injects Discovery Protocol reminders into every LLM call via pre_llm_call hook.
+author: Hermes Agent
+kind: standalone
+provides_hooks:
+  - pre_llm_call

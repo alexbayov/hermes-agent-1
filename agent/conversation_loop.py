@@ -439,6 +439,8 @@ def run_conversation(
     # Reset retry counters and iteration budget at the start of each turn
     # so subagent usage from a previous turn doesn't eat into the next one.
     agent._invalid_tool_retries = 0
+    agent._last_progress_sig = None
+    agent._no_progress_count = 0
     agent._invalid_json_retries = 0
     agent._empty_content_retries = 0
     agent._incomplete_scratchpad_retries = 0
@@ -808,6 +810,42 @@ def run_conversation(
         api_call_count += 1
         agent._api_call_count = api_call_count
         agent._touch_activity(f"starting API call #{api_call_count}")
+
+        # Enhanced per-iteration status for observability (HRM-26)
+        agent._emit_status(
+            f"🔄 iter {api_call_count}/{agent.max_iterations} "
+            f"— budget {agent.iteration_budget.used}/{agent.iteration_budget.max_total}"
+        )
+
+        # No-progress breaker — detect stalls (HRM-26)
+        # Progress signature: tool names from LAST assistant message + hash of last tool result
+        _last_tool_names = []
+        _last_result = ""
+        for m in reversed(messages):
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                _last_tool_names = sorted(tc["function"]["name"] for tc in m["tool_calls"])
+                break
+        for m in reversed(messages):
+            if m.get("role") == "tool":
+                _last_result = str(m.get("content", ""))[:200]
+                break
+        _progress_sig = hash((tuple(_last_tool_names), _last_result)) if _last_tool_names else 0
+        if not hasattr(agent, "_last_progress_sig"):
+            agent._last_progress_sig = None
+            agent._no_progress_count = 0
+        if _progress_sig == agent._last_progress_sig and _progress_sig != 0:
+            agent._no_progress_count += 1
+        else:
+            agent._no_progress_count = 0
+            agent._last_progress_sig = _progress_sig
+        _no_progress_k = getattr(agent, "no_progress_k", 4)
+        if agent._no_progress_count >= _no_progress_k:
+            _turn_exit_reason = "no_progress_stall"
+            agent._emit_status(
+                f"⏸️ No progress for {agent._no_progress_count} iterations — "
+                f"same tool pattern detected. Escalating to LO."
+            )
+            break
 
         # Grace call: the budget is exhausted but we gave the model one
         # more chance.  Consume the grace flag so the loop exits after
