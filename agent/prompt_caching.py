@@ -77,3 +77,20 @@ def apply_anthropic_cache_control(
         _apply_cache_marker(messages[idx], marker, native_anthropic=native_anthropic)
 
     return messages
+
+def strip_cache_control(api_messages: list) -> list:
+    """Remove all cache_control markers from messages (for non-Anthropic fallback)."""
+    import copy
+    messages = copy.deepcopy(api_messages)
+    for msg in messages:
+        msg.pop("cache_control", None)
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    part.pop("cache_control", None)
+        if "tool" == msg.get("role") and isinstance(msg.get("content"), list):
+            for part in msg["content"]:
+                if isinstance(part, dict):
+                    part.pop("cache_control", None)
+    return messages

@@ -52,7 +52,7 @@ from agent.model_metadata import (
     save_context_length,
 )
 from agent.process_bootstrap import _install_safe_stdio
-from agent.prompt_caching import apply_anthropic_cache_control
+from agent.prompt_caching import apply_anthropic_cache_control, strip_cache_control
 from agent.retry_utils import jittered_backoff
 from agent.trajectory import has_incomplete_scratchpad
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
@@ -1060,6 +1060,8 @@ def run_conversation(
                 cache_ttl=agent._cache_ttl,
                 native_anthropic=agent._use_native_cache_layout,
             )
+        else:
+            api_messages = strip_cache_control(api_messages)
 
         # Safety net: strip orphaned tool results / add stubs for missing
         # results before sending to the API.  Runs unconditionally — not
