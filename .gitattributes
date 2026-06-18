@@ -8,3 +8,25 @@ web/package-lock.json linguist-generated=true
 Dockerfile  text eol=lf
 *.dockerfile text eol=lf
 docker/entrypoint.sh text eol=lf
+
+# === Merge protection: our files that upstream never had ===
+# If upstream creates a file with the same name, keep ours unconditionally.
+agent/automation_state.py     merge=ours
+agent/automation_tool.py      merge=ours
+agent/automation_tool_entry.py merge=ours
+plugins/discovery_protocol/__init__.py merge=ours
+plugins/discovery_protocol/plugin.yaml   merge=ours
+tools/automation_tool.py      merge=ours
+
+# === Merge protection: ~/.hermes workspace config (if this repo is checked out there) ===
+# These are our local configs; upstream must not touch them.
+memories/MEMORY.md            merge=ours
+memories/USER.md              merge=ours
+profile/config.yaml           merge=ours
+.env                          merge=ours
+scripts/sauna-reg.py          merge=ours
+scripts/kiro_*.py             merge=ours
+scripts/aerolink_*.py         merge=ours
+scripts/email_*.py            merge=ours
+projects/memory-system/       merge=ours
+projects/hermes-patches/      merge=ours
