@@ -968,15 +968,44 @@ class AIAgent:
         ``ValueError`` such as ``expected ident at line 1 column 149``.  That
         is provider wire-format trouble, not local request validation, so it
         should follow the same retry path as a truncated JSON body.
+
+        Extended (2026-06): Kimi/Kimchi and other reasoning providers can
+        send truncated SSE chunks that manifest as json.JSONDecodeError
+        ("Unterminated string", "Expecting ',' delimiter", etc.) in
+        OpenAI streaming mode.  These are wire-format provider errors,
+        not local validation, and should also be retried.
         """
-        if getattr(self, "api_mode", None) != "anthropic_messages":
-            return False
-        if not isinstance(error, ValueError):
-            return False
-        if isinstance(error, (UnicodeEncodeError, json.JSONDecodeError)):
-            return False
-        message = str(error).strip().lower()
-        return "expected ident at line" in message
+        # --- Anthropic mode: original logic ---
+        if getattr(self, "api_mode", None) == "anthropic_messages":
+            if not isinstance(error, ValueError):
+                return False
+            if isinstance(error, (UnicodeEncodeError, json.JSONDecodeError)):
+                return False
+            message = str(error).strip().lower()
+            return "expected ident at line" in message
+
+        # --- OpenAI mode: catch provider-side JSON parse errors ---
+        # json.JSONDecodeError from truncated/broken SSE chunks
+        if isinstance(error, json.JSONDecodeError):
+            msg = str(error).lower()
+            _openai_stream_phrases = (
+                "unterminated string",
+                "expecting",
+                "delimiter",
+                "expecting value",
+                "expecting property",
+                "extra data",
+                "end of file",
+            )
+            return any(p in msg for p in _openai_stream_phrases)
+
+        # OpenAI SDK can wrap these as generic ValueError/APIError
+        if isinstance(error, ValueError):
+            msg = str(error).lower()
+            if any(p in msg for p in ("unterminated string", "expecting", "delimiter", "invalid json")):
+                return True
+
+        return False
 
     def _log_stream_retry(
         self,
