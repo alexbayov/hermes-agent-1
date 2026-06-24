@@ -1857,148 +1857,162 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         role = "assistant"
         reasoning_parts: list = []
         usage_obj = None
-        for chunk in stream:
-            last_chunk_time["t"] = time.time()
-            agent._touch_activity("receiving stream response")
+        try:
+            for chunk in stream:
+                last_chunk_time["t"] = time.time()
+                agent._touch_activity("receiving stream response")
 
-            # Update per-attempt diagnostic counters.  Best-effort —
-            # failures are swallowed so the streaming hot path is never
-            # interrupted by diagnostic accounting.
-            try:
-                _diag["chunks"] = int(_diag.get("chunks", 0)) + 1
-                if _diag.get("first_chunk_at") is None:
-                    _diag["first_chunk_at"] = last_chunk_time["t"]
-                # Approximate byte size from the chunk's repr — exact wire
-                # bytes aren't exposed by the SDK, but len(repr(chunk)) is
-                # a stable proxy for "how much content arrived" that
-                # survives stub provider differences.
+                # Update per-attempt diagnostic counters.  Best-effort —
+                # failures are swallowed so the streaming hot path is never
+                # interrupted by diagnostic accounting.
                 try:
-                    _diag["bytes"] = int(_diag.get("bytes", 0)) + len(repr(chunk))
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-            if agent._interrupt_requested:
-                break
-
-            if not chunk.choices:
-                if hasattr(chunk, "model") and chunk.model:
-                    model_name = chunk.model
-                # Usage comes in the final chunk with empty choices
-                if hasattr(chunk, "usage") and chunk.usage:
-                    usage_obj = chunk.usage
-                continue
-
-            delta = chunk.choices[0].delta
-            if hasattr(chunk, "model") and chunk.model:
-                model_name = chunk.model
-
-            # Accumulate reasoning content
-            reasoning_text = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
-            if reasoning_text:
-                reasoning_parts.append(reasoning_text)
-                _fire_first_delta()
-                agent._fire_reasoning_delta(reasoning_text)
-
-            # Accumulate text content — fire callback only when no tool calls
-            if delta and delta.content:
-                content_parts.append(delta.content)
-                if not tool_calls_acc:
-                    _fire_first_delta()
-                    agent._fire_stream_delta(delta.content)
-                    deltas_were_sent["yes"] = True
-                # Tool calls suppress regular content streaming (avoids
-                # displaying chatty "I'll use the tool..." text alongside
-                # tool calls).  But reasoning tags embedded in suppressed
-                # content should still reach the display — otherwise the
-                # reasoning box only appears as a post-response fallback,
-                # rendering it confusingly after the already-streamed
-                # response.  Route suppressed content through the stream
-                # delta callback so its tag extraction can fire the
-                # reasoning display.  Non-reasoning text is harmlessly
-                # suppressed by the CLI's _stream_delta when the stream
-                # box is already closed (tool boundary flush).
-                elif agent.stream_delta_callback:
+                    _diag["chunks"] = int(_diag.get("chunks", 0)) + 1
+                    if _diag.get("first_chunk_at") is None:
+                        _diag["first_chunk_at"] = last_chunk_time["t"]
+                    # Approximate byte size from the chunk's repr — exact wire
+                    # bytes aren't exposed by the SDK, but len(repr(chunk)) is
+                    # a stable proxy for "how much content arrived" that
+                    # survives stub provider differences.
                     try:
-                        agent.stream_delta_callback(delta.content)
-                        agent._record_streamed_assistant_text(delta.content)
+                        _diag["bytes"] = int(_diag.get("bytes", 0)) + len(repr(chunk))
                     except Exception:
                         pass
+                except Exception:
+                    pass
 
-            # Accumulate tool call deltas — notify display on first name
-            if delta and delta.tool_calls:
-                for tc_delta in delta.tool_calls:
-                    raw_idx = tc_delta.index if tc_delta.index is not None else 0
-                    delta_id = tc_delta.id or ""
+                if agent._interrupt_requested:
+                    break
 
-                    # Ollama fix: detect a new tool call reusing the same
-                    # raw index (different id) and redirect to a fresh slot.
-                    if raw_idx not in _active_slot_by_idx:
-                        _active_slot_by_idx[raw_idx] = raw_idx
-                    if (
-                        delta_id
-                        and raw_idx in _last_id_at_idx
-                        and delta_id != _last_id_at_idx[raw_idx]
-                    ):
-                        new_slot = max(tool_calls_acc, default=-1) + 1
-                        _active_slot_by_idx[raw_idx] = new_slot
-                    if delta_id:
-                        _last_id_at_idx[raw_idx] = delta_id
-                    idx = _active_slot_by_idx[raw_idx]
+                if not chunk.choices:
+                    if hasattr(chunk, "model") and chunk.model:
+                        model_name = chunk.model
+                    # Usage comes in the final chunk with empty choices
+                    if hasattr(chunk, "usage") and chunk.usage:
+                        usage_obj = chunk.usage
+                    continue
 
-                    if idx not in tool_calls_acc:
-                        tool_calls_acc[idx] = {
-                            "id": tc_delta.id or "",
-                            "type": "function",
-                            "function": {"name": "", "arguments": ""},
-                            "extra_content": None,
-                        }
-                    entry = tool_calls_acc[idx]
-                    if tc_delta.id:
-                        entry["id"] = tc_delta.id
-                    if tc_delta.function:
-                        if tc_delta.function.name:
-                            # Use assignment, not +=.  Function names are
-                            # atomic identifiers delivered complete in the
-                            # first chunk (OpenAI spec).  Some providers
-                            # (MiniMax M2.7 via NVIDIA NIM) resend the full
-                            # name in every chunk; concatenation would
-                            # produce "read_fileread_file".  Assignment
-                            # (matching the OpenAI Node SDK / LiteLLM /
-                            # Vercel AI patterns) is immune to this.
-                            entry["function"]["name"] = tc_delta.function.name
-                        if tc_delta.function.arguments:
-                            entry["function"]["arguments"] += tc_delta.function.arguments
-                    extra = getattr(tc_delta, "extra_content", None)
-                    if extra is None and hasattr(tc_delta, "model_extra"):
-                        extra = (tc_delta.model_extra or {}).get("extra_content")
-                    if extra is not None:
-                        if hasattr(extra, "model_dump"):
-                            extra = extra.model_dump()
-                        entry["extra_content"] = extra
-                    # Fire once per tool when the full name is available
-                    name = entry["function"]["name"]
-                    if name and idx not in tool_gen_notified:
-                        tool_gen_notified.add(idx)
+                delta = chunk.choices[0].delta
+                if hasattr(chunk, "model") and chunk.model:
+                    model_name = chunk.model
+
+                # Accumulate reasoning content
+                reasoning_text = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                if reasoning_text:
+                    reasoning_parts.append(reasoning_text)
+                    _fire_first_delta()
+                    agent._fire_reasoning_delta(reasoning_text)
+
+                # Accumulate text content — fire callback only when no tool calls
+                if delta and delta.content:
+                    content_parts.append(delta.content)
+                    if not tool_calls_acc:
                         _fire_first_delta()
-                        agent._fire_tool_gen_started(name)
-                        # Record the partial tool-call name so the outer
-                        # stub-builder can surface a user-visible warning
-                        # if streaming dies before this tool's arguments
-                        # are fully delivered.  Without this, a stall
-                        # during tool-call JSON generation lets the stub
-                        # at line ~6107 return `tool_calls=None`, silently
-                        # discarding the attempted action.
-                        result["partial_tool_names"].append(name)
+                        agent._fire_stream_delta(delta.content)
+                        deltas_were_sent["yes"] = True
+                    # Tool calls suppress regular content streaming (avoids
+                    # displaying chatty "I'll use the tool..." text alongside
+                    # tool calls).  But reasoning tags embedded in suppressed
+                    # content should still reach the display — otherwise the
+                    # reasoning box only appears as a post-response fallback,
+                    # rendering it confusingly after the already-streamed
+                    # response.  Route suppressed content through the stream
+                    # delta callback so its tag extraction can fire the
+                    # reasoning display.  Non-reasoning text is harmlessly
+                    # suppressed by the CLI's _stream_delta when the stream
+                    # box is already closed (tool boundary flush).
+                    elif agent.stream_delta_callback:
+                        try:
+                            agent.stream_delta_callback(delta.content)
+                            agent._record_streamed_assistant_text(delta.content)
+                        except Exception:
+                            pass
 
-            if chunk.choices[0].finish_reason:
-                finish_reason = chunk.choices[0].finish_reason
+                # Accumulate tool call deltas — notify display on first name
+                if delta and delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        raw_idx = tc_delta.index if tc_delta.index is not None else 0
+                        delta_id = tc_delta.id or ""
 
-            # Usage in the final chunk
-            if hasattr(chunk, "usage") and chunk.usage:
-                usage_obj = chunk.usage
+                        # Ollama fix: detect a new tool call reusing the same
+                        # raw index (different id) and redirect to a fresh slot.
+                        if raw_idx not in _active_slot_by_idx:
+                            _active_slot_by_idx[raw_idx] = raw_idx
+                        if (
+                            delta_id
+                            and raw_idx in _last_id_at_idx
+                            and delta_id != _last_id_at_idx[raw_idx]
+                        ):
+                            new_slot = max(tool_calls_acc, default=-1) + 1
+                            _active_slot_by_idx[raw_idx] = new_slot
+                        if delta_id:
+                            _last_id_at_idx[raw_idx] = delta_id
+                        idx = _active_slot_by_idx[raw_idx]
 
+                        if idx not in tool_calls_acc:
+                            tool_calls_acc[idx] = {
+                                "id": tc_delta.id or "",
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                                "extra_content": None,
+                            }
+                        entry = tool_calls_acc[idx]
+                        if tc_delta.id:
+                            entry["id"] = tc_delta.id
+                        if tc_delta.function:
+                            if tc_delta.function.name:
+                                # Use assignment, not +=.  Function names are
+                                # atomic identifiers delivered complete in the
+                                # first chunk (OpenAI spec).  Some providers
+                                # (MiniMax M2.7 via NVIDIA NIM) resend the full
+                                # name in every chunk; concatenation would
+                                # produce "read_fileread_file".  Assignment
+                                # (matching the OpenAI Node SDK / LiteLLM /
+                                # Vercel AI patterns) is immune to this.
+                                entry["function"]["name"] = tc_delta.function.name
+                            if tc_delta.function.arguments:
+                                entry["function"]["arguments"] += tc_delta.function.arguments
+                        extra = getattr(tc_delta, "extra_content", None)
+                        if extra is None and hasattr(tc_delta, "model_extra"):
+                            extra = (tc_delta.model_extra or {}).get("extra_content")
+                        if extra is not None:
+                            if hasattr(extra, "model_dump"):
+                                extra = extra.model_dump()
+                            entry["extra_content"] = extra
+                        # Fire once per tool when the full name is available
+                        name = entry["function"]["name"]
+                        if name and idx not in tool_gen_notified:
+                            tool_gen_notified.add(idx)
+                            _fire_first_delta()
+                            agent._fire_tool_gen_started(name)
+                            # Record the partial tool-call name so the outer
+                            # stub-builder can surface a user-visible warning
+                            # if streaming dies before this tool's arguments
+                            # are fully delivered.  Without this, a stall
+                            # during tool-call JSON generation lets the stub
+                            # at line ~6107 return `tool_calls=None`, silently
+                            # discarding the attempted action.
+                            result["partial_tool_names"].append(name)
+
+                if chunk.choices[0].finish_reason:
+                    finish_reason = chunk.choices[0].finish_reason
+
+                # Usage in the final chunk
+                if hasattr(chunk, "usage") and chunk.usage:
+                    usage_obj = chunk.usage
+
+        except json.JSONDecodeError as _sse_parse_err:
+            # Kimi/Kimchi can emit truncated SSE chunks that the OpenAI
+            # SDK surfaces as json.JSONDecodeError mid-iteration. Abort
+            # the chunk loop cleanly so the mock_message reconstruction
+            # below uses whatever content/reasoning arrived before the
+            # broken chunk, rather than burning 3x full-reasoning retries
+            # (the original cause of 10-minute stalls on ENU).
+            logger.warning(
+                "SSE chunk parse error mid-stream (likely truncated "
+                "reasoning from Kimi/Kimchi); ending stream early with "
+                "partial content. err=%s chunks_seen=%s content_parts=%d reasoning_parts=%d",
+                _sse_parse_err, _diag.get("chunks",0), len(content_parts), len(reasoning_parts),
+            )
         # Build mock response matching non-streaming shape
         full_content = "".join(content_parts) or None
         mock_tool_calls = None

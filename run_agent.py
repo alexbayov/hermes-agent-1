@@ -984,26 +984,21 @@ class AIAgent:
             message = str(error).strip().lower()
             return "expected ident at line" in message
 
-        # --- OpenAI mode: catch provider-side JSON parse errors ---
-        # json.JSONDecodeError from truncated/broken SSE chunks
+        # --- OpenAI mode: Kimchi/Kimi JSONDecodeError handling (2026-06-24) ---
+        # Kimchi reasoning provider can emit truncated SSE chunks that the
+        # OpenAI SDK surfaces as json.JSONDecodeError mid-stream. Retrying
+        # the WHOLE request re-runs the (often long) reasoning preamble,
+        # producing 10+ minute stalls on every turn.  Instead, treat these
+        # as non-retryable: the caller already received streamed tokens,
+        # and the partial path in chat_completion_helpers._call() preserves
+        # whatever content/reasoning arrived before the broken chunk.
         if isinstance(error, json.JSONDecodeError):
-            msg = str(error).lower()
-            _openai_stream_phrases = (
-                "unterminated string",
-                "expecting",
-                "delimiter",
-                "expecting value",
-                "expecting property",
-                "extra data",
-                "end of file",
-            )
-            return any(p in msg for p in _openai_stream_phrases)
+            return False
 
-        # OpenAI SDK can wrap these as generic ValueError/APIError
+        # OpenAI SDK can wrap these as generic ValueError/APIError; keep
+        # them non-retryable for the same reason as above.
         if isinstance(error, ValueError):
-            msg = str(error).lower()
-            if any(p in msg for p in ("unterminated string", "expecting", "delimiter", "invalid json")):
-                return True
+            return False
 
         return False
 
